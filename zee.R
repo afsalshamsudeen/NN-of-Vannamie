@@ -107,6 +107,7 @@ predictions <- list()
 X_train_lstm <- array(X_train, dim = c(nrow(X_train), 1, ncol(X_train)))
 X_test_lstm <- array(X_test, dim = c(nrow(X_test), 1, ncol(X_test)))
 
+
 # Create and build the model using the pipe operator
 lstm_model <- keras_model_sequential() %>%
   layer_lstm(units = 50, input_shape = c(1, ncol(X_train)), return_sequences = FALSE) %>%
@@ -132,13 +133,19 @@ lstm_pred_denorm <- denormalize(lstm_pred, min_target, range_target)
 predictions$LSTM <- data.frame(Actual = y_test_actual, Predicted = lstm_pred_denorm)
 print(class(lstm_model))
 
+
+
 # ------------------- BPNN Model -------------------
 formula <- as.formula(paste("Avg_Weight ~", paste(names(train_norm)[-ncol(train_norm)], collapse = " + ")))
-bp_model <- neuralnet(formula, data = train_norm, hidden = c(10, 5), linear.output = TRUE)
-bp_pred <- compute(bp_model, test_norm[, -ncol(test_norm)])$net.result
+bpnn_model <- neuralnet(formula, data = train_norm, hidden = c(10, 5), linear.output = TRUE)
+bp_pred <- compute(bpnn_model, test_norm[, -ncol(test_norm)])$net.result
 results$BPNN <- calc_metrics(y_test_norm, bp_pred, min_target, range_target)
 bp_pred_denorm <- denormalize(bp_pred, min_target, range_target)
 predictions$BPNN <- data.frame(Actual = y_test_actual, Predicted = bp_pred_denorm)
+
+save(bpnn_model, file = "bpnn_model_fixed.RData")
+
+
 
 # ------------------- GRNN Model -------------------
 grnn_model <- learn(train_norm, variable.column = ncol(train_norm))
@@ -149,6 +156,7 @@ grnn_pred <- sapply(1:nrow(test_norm), function(i) {
 results$GRNN <- calc_metrics(y_test_norm, grnn_pred, min_target, range_target)
 grnn_pred_denorm <- denormalize(grnn_pred, min_target, range_target)
 predictions$GRNN <- data.frame(Actual = y_test_actual, Predicted = grnn_pred_denorm)
+save(grnn_model, file = "grnn_model.RData")
 
 # ------------------- Model Performance Table -------------------
 performance_table <- do.call(rbind, lapply(names(results), function(model) {
