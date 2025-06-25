@@ -61,43 +61,27 @@ normalize <- function(x) {
   if (rng == 0) return(rep(0, length(x)))  # avoid divide by 0
   (x - min(x)) / rng
 }
-
 # Store min and max for denormalization
-feature_mins <- apply(train_data, 2, min)
-feature_maxs <- apply(train_data, 2, max)
-feature_ranges <- feature_maxs - feature_mins
-min_target <- feature_mins["Avg_Weight"]
-range_target <- feature_ranges["Avg_Weight"]
+train_target <- train_data$Avg_Weight
+min_target <- min(train_target)
+max_target <- max(train_target)
+range_target <- max_target - min_target
 
-# Check for zero-variance features (you can optionally drop them)
-zero_variance <- which(feature_ranges == 0)
-if (length(zero_variance) > 0) {
-  warning(paste("The following features have zero variance:", paste(names(zero_variance), collapse = ", ")))
-}
-
-normalize_fixed <- function(x, min_val, range_val) {
-  if (range_val == 0) return(rep(0, length(x)))  # Prevent division by zero
-  (x - min_val) / range_val
-}
-
-# Normalize train
-train_norm <- as.data.frame(mapply(normalize_fixed, train_data, feature_mins, feature_ranges, SIMPLIFY = FALSE))
-
-# Normalize test using training min and max
-test_norm <- as.data.frame(mapply(normalize_fixed, test_data, feature_mins, feature_ranges, SIMPLIFY = FALSE))
+train_norm <- as.data.frame(lapply(train_data, normalize))
+test_norm <- as.data.frame(lapply(test_data, normalize))
 
 X_train <- as.matrix(train_norm[, -ncol(train_norm)])
 y_train <- as.matrix(train_norm[, ncol(train_norm)])
-
 X_test <- as.matrix(test_norm[, -ncol(test_norm)])
 y_test_actual <- test_data$Avg_Weight
+y_test_norm <- (y_test_actual - min_target) / range_target  # Normalize y_test_actual
 
 # Denormalize function
 denormalize <- function(x, min_val, range_val) {
   x * range_val + min_val
 }
 
-# ------------------- Metrics Function (Updated) -------------------
+# ------------------- Metrics Function -------------------
 calc_metrics <- function(actual, predicted, min_val, range_val) {
   # Denormalize predicted values
   actual <- denormalize(actual, min_val, range_val)  # Actual is already in original scale
@@ -105,12 +89,16 @@ calc_metrics <- function(actual, predicted, min_val, range_val) {
   
   rmse <- sqrt(mean((actual - predicted)^2))
   mae <- mean(abs(actual - predicted))
-  mape <- mean(abs((actual[nonzero_actual] - predicted[nonzero_actual]) / actual[nonzero_actual])) * 100
-   r2 <- cor(actual, predicted)^2
+  # Handle division by zero in MAPE
+  nonzero_actual <- actual != 0
+  if (sum(nonzero_actual) == 0) {
+    mape <- NA  # If all actual values are 0, MAPE is undefined
+  } else {
+    mape <- mean(abs((actual[nonzero_actual] - predicted[nonzero_actual]) / actual[nonzero_actual])) * 100
+  }
+  r2 <- cor(actual, predicted)^2
   return(c(RMSE = rmse, MAE = mae, MAPE = mape, R2 = r2))
 }
-
-
 
 results <- list()
 predictions <- list()
@@ -122,7 +110,7 @@ X_test_lstm <- array(X_test, dim = c(nrow(X_test), 1, ncol(X_test)))
 
 # Create and build the model using the pipe operator
 lstm_model <- keras_model_sequential() %>%
-  layer_lstm(units = 50, input_shape = c(1, ncol(X_train)), return_sequences = FALSE) %>%
+  layer_lstm(units = 50, input_shape = c(1,1, ncol(X_train)), return_sequences = FALSE) %>%
   layer_dense(units = 1)
 
 # Compile the model
@@ -139,7 +127,7 @@ lstm_model %>% fit(
 
 # Predict
 lstm_pred <- predict(lstm_model, X_test_lstm)
-results$LSTM <- calc_metrics(y_test_actual, lstm_pred, min_target, range_target)
+results$LSTM <- calc_metrics(y_test_norm, lstm_pred, min_target, range_target)
 # Denormalize for plotting
 lstm_pred_denorm <- denormalize(lstm_pred, min_target, range_target)
 predictions$LSTM <- data.frame(Actual = y_test_actual, Predicted = lstm_pred_denorm)
@@ -151,7 +139,7 @@ print(class(lstm_model))
 formula <- as.formula(paste("Avg_Weight ~", paste(names(train_norm)[-ncol(train_norm)], collapse = " + ")))
 bpnn_model <- neuralnet(formula, data = train_norm, hidden = c(10, 5), linear.output = TRUE)
 bp_pred <- compute(bpnn_model, test_norm[, -ncol(test_norm)])$net.result
-results$BPNN <- calc_metrics(y_test_actual, bp_pred, min_target, range_target)
+results$BPNN <- calc_metrics(y_test_norm, bp_pred, min_target, range_target)
 bp_pred_denorm <- denormalize(bp_pred, min_target, range_target)
 predictions$BPNN <- data.frame(Actual = y_test_actual, Predicted = bp_pred_denorm)
 
@@ -165,22 +153,15 @@ grnn_model <- smooth(grnn_model, sigma = 0.1)
 grnn_pred <- sapply(1:nrow(test_norm), function(i) {
   guess(grnn_model, as.matrix(test_norm[i, -ncol(test_norm)]))
 })
-results$GRNN <- calc_metrics(y_test_actual, grnn_pred, min_target, range_target)
+results$GRNN <- calc_metrics(y_test_norm, grnn_pred, min_target, range_target)
 grnn_pred_denorm <- denormalize(grnn_pred, min_target, range_target)
 predictions$GRNN <- data.frame(Actual = y_test_actual, Predicted = grnn_pred_denorm)
 save(grnn_model, file = "grnn_model.RData")
 
 # ------------------- Model Performance Table -------------------
-# Ensure all models report all four metrics (even if some are NA)
 performance_table <- do.call(rbind, lapply(names(results), function(model) {
-  res <- results[[model]]
-  metrics <- c("RMSE", "MAE", "MAPE", "R2")
-  # Fill missing metrics with NA
-  res_full <- setNames(rep(NA, length(metrics)), metrics)
-  res_full[names(res)] <- res
-  data.frame(Model = model, t(res_full))
+  data.frame(Model = model, t(results[[model]]))
 }))
-
 print(performance_table)
 write.csv(performance_table, "neural_model_performance.csv", row.names = FALSE)
 
@@ -259,59 +240,15 @@ pdf("sensitivity_analysis.pdf")
 do.call(grid.arrange, c(sensitivity_plots, ncol = 1))
 dev.off()
 
-# ------------------- Model Performance Table (Enhanced) -------------------
-# Ensure all models report all four metrics (even if some are NA)
-performance_table <- do.call(rbind, lapply(names(results), function(model) {
-  res <- results[[model]]
-  metrics <- c("RMSE", "MAE", "MAPE", "R2")
-  # Fill missing metrics with NA and ensure all are present
-  res_full <- setNames(rep(NA, length(metrics)), metrics)
-  if (!is.null(res) && length(res) > 0) {
-    names(res) <- metrics[1:length(res)]  # Align names if mismatched
-    res_full[names(res)] <- res
-  }
-  data.frame(Model = model, t(res_full))
-}))
-
-# Print to debug
-print("Performance Table:")
-print(performance_table)
-
-# ------------------- Combined Model Performance (Revised) -------------------
+# ------------------- Combined Model Performance -------------------
 library(reshape2)
-
-# Reshape the performance table
 performance_long <- melt(performance_table, id.vars = "Model")
 
-# Ensure all Model-Metric combinations exist
-all_models <- unique(performance_long$Model)
-all_metrics <- c("RMSE", "MAE", "MAPE", "R2")  # Explicitly define all metrics
-complete_grid <- expand.grid(Model = all_models, variable = all_metrics)
-
-# Merge with the actual data to fill missing combinations with a small default value
-performance_long <- merge(complete_grid, performance_long, by = c("Model", "variable"), all.x = TRUE)
-performance_long$value[is.na(performance_long$value)] <- 1e-10  # Use a small value instead of 0 to avoid zero range
-
-# Normalize each metric for comparison
-performance_long <- do.call(rbind, lapply(split(performance_long, performance_long$variable), function(df) {
-  max_val <- max(df$value, na.rm = TRUE)
-  min_val <- min(df$value, na.rm = TRUE)
-  range_val <- max_val - min_val
-  if (range_val == 0) {
-    df$Normalized_Value <- 0  # Avoid division by zero
-  } else {
-    df$Normalized_Value <- (df$value - min_val) / range_val
-  }
-  return(df)
-}))
-
-# Plot normalized values
-ggplot(performance_long, aes(x = Model, y = Normalized_Value, fill = variable)) +
+ggplot(performance_long, aes(x = Model, y = value, fill = variable)) +
   geom_bar(stat = "identity", position = "dodge") +
-  ggtitle("Model Performance Comparison (Normalized)") +
-  ylab("Normalized Metric Value") + xlab("Model") +
-  theme_minimal() + scale_fill_brewer(palette = "Set2") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggtitle("Model Performance Comparison") +
+  ylab("Metric Value") + xlab("Model") +
+  theme_minimal() + scale_fill_brewer(palette = "Set2")
 
 ggsave("combined_model_performance.pdf", width = 8, height = 5)
 
@@ -338,6 +275,3 @@ ggplot(top_features_combined, aes(x = reorder(Feature, Importance), y = Importan
   theme(axis.text.y = element_text(size = 7))
 
 ggsave("all_model_feature_importance.pdf", width = 10, height = 6)
-
-
-
