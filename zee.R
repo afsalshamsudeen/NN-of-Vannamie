@@ -61,34 +61,50 @@ normalize <- function(x) {
   if (rng == 0) return(rep(0, length(x)))  # avoid divide by 0
   (x - min(x)) / rng
 }
-# Store min and max for denormalization
-train_target <- train_data$Avg_Weight
-min_target <- min(train_target)
-max_target <- max(train_target)
-range_target <- max_target - min_target
 
-train_norm <- as.data.frame(lapply(train_data, normalize))
-test_norm <- as.data.frame(lapply(test_data, normalize))
+# Store min and max for denormalization
+feature_mins <- apply(train_data, 2, min)
+feature_maxs <- apply(train_data, 2, max)
+feature_ranges <- feature_maxs - feature_mins
+min_target <- feature_mins["Avg_Weight"]
+range_target <- feature_ranges["Avg_Weight"]
+
+# Check for zero-variance features (you can optionally drop them)
+zero_variance <- which(feature_ranges == 0)
+if (length(zero_variance) > 0) {
+  warning(paste("The following features have zero variance:", paste(names(zero_variance), collapse = ", ")))
+}
+
+normalize_fixed <- function(x, min_val, range_val) {
+  if (range_val == 0) return(rep(0, length(x)))  # Prevent division by zero
+  (x - min_val) / range_val
+}
+
+# Normalize train
+train_norm <- as.data.frame(mapply(normalize_fixed, train_data, feature_mins, feature_ranges, SIMPLIFY = FALSE))
+
+# Normalize test using training min and max
+test_norm <- as.data.frame(mapply(normalize_fixed, test_data, feature_mins, feature_ranges, SIMPLIFY = FALSE))
 
 X_train <- as.matrix(train_norm[, -ncol(train_norm)])
 y_train <- as.matrix(train_norm[, ncol(train_norm)])
+
 X_test <- as.matrix(test_norm[, -ncol(test_norm)])
 y_test_actual <- test_data$Avg_Weight
-y_test_norm <- (y_test_actual - min_target) / range_target  # Normalize y_test_actual
 
 # Denormalize function
 denormalize <- function(x, min_val, range_val) {
   x * range_val + min_val
 }
 
-# ------------------- Metrics Function -------------------
+# ------------------- Metrics Function (Updated) -------------------
 calc_metrics <- function(actual, predicted, min_val, range_val) {
-  # Denormalize predicted values
-  actual <- denormalize(actual, min_val, range_val)  # Actual is already in original scale
+  # Denormalize predicted values only
   predicted <- denormalize(predicted, min_val, range_val)
   
   rmse <- sqrt(mean((actual - predicted)^2))
   mae <- mean(abs(actual - predicted))
+  
   # Handle division by zero in MAPE
   nonzero_actual <- actual != 0
   if (sum(nonzero_actual) == 0) {
@@ -96,9 +112,11 @@ calc_metrics <- function(actual, predicted, min_val, range_val) {
   } else {
     mape <- mean(abs((actual[nonzero_actual] - predicted[nonzero_actual]) / actual[nonzero_actual])) * 100
   }
+  
   r2 <- cor(actual, predicted)^2
   return(c(RMSE = rmse, MAE = mae, MAPE = mape, R2 = r2))
 }
+
 
 results <- list()
 predictions <- list()
